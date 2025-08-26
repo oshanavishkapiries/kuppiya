@@ -1,81 +1,87 @@
-# 📘 Chapter 3: Consistency (කන්සිස්ටන්සි)
+# 📘 Chapter 4: Isolation (අයිසොලේෂන්)
 
 ## 🔹 Theory Part
 
 **Definition:**
-Consistency කියන්නේ transaction එකක් DB එකට apply වුනාම, Database එක **valid state** එකකම තියෙන්න ඕන කියන principle එක.
+Isolation කියන්නේ **multiple transactions එකම වෙලාවට run වෙද්දී** ඒවා එකිනෙකට **interfere නොවෙන්න ඕන** කියන principle එක.
 
 👉 සරල definition එක:
 
-> Database එකේ **rules (constraints, validations, business logic)** කිසිදා **break වෙන්න දෙන්න බෑ**.
+> එක transaction එකක් data එකට data corruption/dirty state cause කරන්න බෑ.
 
 ---
 
-### 🏦 Banking Example (Theory)
+### ⚠️ Common Problems Without Isolation
 
-Imagine:
+1. **Dirty Read** 🩸
 
-* Bank account එකේ balance එක **negative** වෙන්න දෙන්න බෑ.
-* Transaction එකක් fail උනොත්, **rollback** වෙලා DB එක පරණ valid state එකේම තියෙන්න ඕන.
+   * Transaction A → update data (not committed yet)
+   * Transaction B → read that uncommitted data
+   * If A later rolls back → B saw **wrong data**.
 
-**Example:**
+2. **Lost Update** ❌
 
-* A ගිණුම = Rs. 2000
-* A wants to transfer Rs. 5000 to B
+   * Transaction A read balance (1000)
+   * Transaction B read balance (1000)
+   * A updates → balance = 800
+   * B updates → balance = 900
+   * Final balance should be 700, but actually = 900 (A’s update lost).
 
-👉 Atomicity එක check කරනවා **All or Nothing** කියලා.
-👉 **Consistency check කරනවා**: “A balance < 0 වෙන්නේද?”
+3. **Non-Repeatable Read** 🔁
 
-* Answer YES → ❌ Reject transaction
-* Answer NO → ✅ Commit transaction
+   * Transaction A read a row (balance = 2000)
+   * Transaction B updated the same row (balance = 3000)
+   * Transaction A read again → balance = 3000 (same query → different result).
+
+4. **Phantom Read** 👻
+
+   * Transaction A runs query: `SELECT * FROM accounts WHERE balance > 1000` → returns 5 rows
+   * Transaction B inserts new row with balance = 2000
+   * Transaction A re-runs query → returns 6 rows (a “phantom” row appeared).
 
 ---
 
-## 🔹 Practical Part (Node.js Example)
+👉 **Solution:** Use **Transaction Isolation Levels**
+(SQL databases usually provide 4 standard levels):
 
-අපි consistency rule එකක් add කරනවා:
-
-> **Account balance එක negative වෙන්න දෙන්න බෑ.**
+1. **READ UNCOMMITTED** → Dirty reads possible
+2. **READ COMMITTED** → Prevents dirty reads
+3. **REPEATABLE READ** → Prevents non-repeatable reads
+4. **SERIALIZABLE** → Prevents all anomalies (but slowest)
 
 ---
 
-### 1. Modify `server.js` (transfer route)
+## 🔹 Practical Part (Node.js Simulation)
+
+අපි SQLite / MySQL එකේ `BEGIN TRANSACTION` use කරලා concurrency simulate කරන්න පුළුවන්.
+
+### 1. Lost Update Simulation
+
+අපි **same account balance update** කරන්න transactions දෙක එකවර run කරමු.
 
 ```js
-app.post('/transfer', (req, res) => {
-  const { fromId, toId, amount } = req.body;
+app.post('/simulate-lost-update', async (req, res) => {
+  const amount = 100;
 
   db.serialize(() => {
-    db.run("BEGIN TRANSACTION");
+    // Transaction A
+    db.get("SELECT balance FROM accounts WHERE id = 1", (err, rowA) => {
+      let newBalanceA = rowA.balance - amount;
 
-    // Check if fromId has enough balance (Consistency Rule)
-    db.get("SELECT balance FROM accounts WHERE id = ?", [fromId], (err, row) => {
-      if (err) {
-        db.run("ROLLBACK");
-        return res.status(500).send("DB Error");
-      }
+      // Transaction B (runs "concurrently")
+      db.get("SELECT balance FROM accounts WHERE id = 1", (err2, rowB) => {
+        let newBalanceB = rowB.balance - amount;
 
-      if (!row || row.balance < amount) {
-        db.run("ROLLBACK");
-        return res.status(400).send("Insufficient funds - Consistency violation");
-      }
+        // Commit A
+        db.run("UPDATE accounts SET balance = ? WHERE id = 1", [newBalanceA], (err3) => {
+          if (err3) return res.status(500).send("Error updating A");
 
-      // Deduct from sender
-      db.run("UPDATE accounts SET balance = balance - ? WHERE id = ?", [amount, fromId], function(err2) {
-        if (err2) {
-          db.run("ROLLBACK");
-          return res.status(500).send("Error deducting balance");
-        }
+          // Commit B (overwrites A’s update)
+          db.run("UPDATE accounts SET balance = ? WHERE id = 1", [newBalanceB], (err4) => {
+            if (err4) return res.status(500).send("Error updating B");
 
-        // Add to receiver
-        db.run("UPDATE accounts SET balance = balance + ? WHERE id = ?", [amount, toId], function(err3) {
-          if (err3) {
-            db.run("ROLLBACK");
-            return res.status(500).send("Error adding balance");
-          }
-
-          db.run("COMMIT");
-          res.send("Transfer successful (Consistency maintained)");
+            res.send("Lost update simulation done");
+          });
         });
       });
     });
@@ -85,41 +91,46 @@ app.post('/transfer', (req, res) => {
 
 ---
 
-## 🔹 Testing Consistency
+### 2. Fixing with Transactions (Isolation)
 
-1. Start server:
+We can fix this with a **`BEGIN IMMEDIATE TRANSACTION` lock** (so only one transaction can update at a time).
 
-   ```bash
-   node server.js
-   ```
+```js
+app.post('/safe-transfer', (req, res) => {
+  const { fromId, toId, amount } = req.body;
 
-2. Try normal transfer (valid funds):
+  db.serialize(() => {
+    db.run("BEGIN IMMEDIATE TRANSACTION"); // lock row
 
-   ```json
-   POST http://localhost:3000/transfer
-   {
-     "fromId": 1,
-     "toId": 2,
-     "amount": 1000
-   }
-   ```
+    db.get("SELECT balance FROM accounts WHERE id = ?", [fromId], (err, row) => {
+      if (err || row.balance < amount) {
+        db.run("ROLLBACK");
+        return res.status(400).send("Insufficient funds or error");
+      }
 
-   ✅ Success – balances update.
+      db.run("UPDATE accounts SET balance = balance - ? WHERE id = ?", [amount, fromId]);
+      db.run("UPDATE accounts SET balance = balance + ? WHERE id = ?", [amount, toId], (err2) => {
+        if (err2) {
+          db.run("ROLLBACK");
+          return res.status(500).send("Transfer failed");
+        }
 
-3. Try invalid transfer (overdraft attempt):
+        db.run("COMMIT");
+        res.send("Safe transfer with Isolation");
+      });
+    });
+  });
+});
+```
 
-   ```json
-   POST http://localhost:3000/transfer
-   {
-     "fromId": 1,
-     "toId": 2,
-     "amount": 10000
-   }
-   ```
+---
 
-   🚨 Result → **"Insufficient funds - Consistency violation"**
+## 🔹 Testing
 
-   * DB state **unchanged**.
-   * No negative balances.
+1. Call `/simulate-lost-update` multiple times →
 
+   * You’ll see account balance dropping incorrectly (lost updates).
 
+2. Call `/safe-transfer` →
+
+   * Always consistent, because transaction locks prevent parallel updates.
