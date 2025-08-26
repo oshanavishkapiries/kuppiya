@@ -1,0 +1,13 @@
+###
+GET http://localhost:3000/accounts
+
+
+###
+POST http://localhost:3000/transfer
+Content-Type: application/json
+
+{
+    "fromId": 1,
+    "toId": 2,
+    "amount": 3000
+}
