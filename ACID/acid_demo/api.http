@@ -11,3 +11,16 @@ Content-Type: application/json
     "toId": 2,
     "amount": 3000
 }
+
+###
+POST http://localhost:3000/consistent-transfer
+Content-Type: application/json
+
+{
+  "fromId": 1,
+  "toId": 2,
+  "amount": 10000
+}
+
+###
+POST http://localhost:3000/isolation-lost-update
